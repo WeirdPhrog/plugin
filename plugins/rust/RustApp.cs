@@ -473,6 +473,8 @@ namespace Oxide.Plugins
 
             public class CombatLogEventDto
             {
+                private static readonly Dictionary<string, string> _normalizedWeaponNameCache = [];
+
                 public float time;
 
                 public string attacker_steam_id;
@@ -513,7 +515,7 @@ namespace Oxide.Plugins
                 {
                     if (ev.attacker == "player")
                     {
-                        var attacker = BaseNetworkable.serverEntities.Find(new NetworkableId(ev.attacker_id)) as BasePlayer; ;
+                        var attacker = BaseNetworkable.serverEntities.Find(new NetworkableId(ev.attacker_id)) as BasePlayer;
                         this.attacker_steam_id = attacker?.UserIDString ?? "";
                     }
 
@@ -526,7 +528,7 @@ namespace Oxide.Plugins
                     this.time = time - ev.time;
                     this.attacker = ev.attacker;
                     this.target = ev.target;
-                    this.weapon = ev.weapon;
+                    this.weapon = NormalizeName(ev.weapon);
                     this.ammo = ev.ammo;
                     this.bone = ev.bone;
                     this.distance = (float)Math.Round(ev.distance, 2);
@@ -561,6 +563,26 @@ namespace Oxide.Plugins
                     }
 
                     return this.target_steam_id;
+                }
+
+                private static string NormalizeName(string fullName)
+                {
+                    const string Suffix = ".entity.prefab";
+
+                    if (string.IsNullOrEmpty(fullName) || fullName == "N/A" || !fullName.EndsWith(Suffix, StringComparison.Ordinal))
+                    {
+                        return fullName;
+                    }
+
+                    if (_normalizedWeaponNameCache.TryGetValue(fullName, out var normalized))
+                    {
+                        return normalized;
+                    }
+
+                    var name = Path.GetFileName(fullName);
+                    normalized = name.Substring(0, name.Length - Suffix.Length);
+                    _normalizedWeaponNameCache[fullName] = normalized;
+                    return normalized;
                 }
             }
 
@@ -2114,14 +2136,6 @@ namespace Oxide.Plugins
                 Unsubscribe(nameof(OnClientCommand));
             }
 
-#if OXIDE
-            _chatCommandPrefixes = Interface.Oxide.Config.Commands.ChatPrefix.ToArray();
-#endif
-
-#if CARBON
-            _chatCommandPrefixes = API.Commands.Command.Prefixes.Select(p => p.Value).ToArray();
-#endif
-
             timer.Once(1f, () =>
             {
                 MetaInfo.Read();
@@ -2129,6 +2143,14 @@ namespace Oxide.Plugins
                 RustAppEngineCreate();
                 RegisterCommands();
             });
+
+#if OXIDE
+            _chatCommandPrefixes = Interface.Oxide.Config.Commands.ChatPrefix.ToArray();
+#endif
+
+#if CARBON
+            _chatCommandPrefixes = API.Commands.Command.Prefixes.Select(p => p.Value).ToArray();
+#endif
         }
 
         private void Unload()
@@ -2916,23 +2938,63 @@ namespace Oxide.Plugins
 
         private readonly struct HitRecord
         {
+            private static readonly Dictionary<string, string> _normalizedWeaponNameCache = [];
+
             public readonly BasePlayer InitiatorPlayer;
             public readonly string Weapon;
             public readonly float Distance;
             public readonly bool IsHeadshot;
+
             public HitRecord(HitInfo info)
             {
-                if (info is null)
+                if (info == null)
                 {
                     return;
                 }
 
                 InitiatorPlayer = info.InitiatorPlayer;
-
                 Distance = info.ProjectileDistance;
                 IsHeadshot = info.isHeadshot;
 
-                Weapon = GetName(info.Weapon) ?? GetName(info.WeaponPrefab) ?? "unknown";
+                Weapon = NormalizeName(info.Weapon?.ShortPrefabName)
+                    ?? NormalizeName(info.WeaponPrefab?.ShortPrefabName)
+                    ?? info.damageTypes?.GetMajorityDamageType().ToString().ToLowerInvariant()
+                    ?? "unknown";
+            }
+
+            private static string NormalizeName(string name)
+            {
+                const string SuffixEntity = ".entity";
+                const string SuffixDeployed = ".deployed";
+
+                if (name == null)
+                {
+                    return null;
+                }
+
+                string suffixToRemove;
+
+                if (name.EndsWith(SuffixEntity, StringComparison.Ordinal))
+                {
+                    suffixToRemove = SuffixEntity;
+                }
+                else if (name.EndsWith(SuffixDeployed, StringComparison.Ordinal))
+                {
+                    suffixToRemove = SuffixDeployed;
+                }
+                else
+                {
+                    return name;
+                }
+
+                if (_normalizedWeaponNameCache.TryGetValue(name, out var normalized))
+                {
+                    return normalized;
+                }
+
+                normalized = name.Substring(0, name.Length - suffixToRemove.Length);
+                _normalizedWeaponNameCache[name] = normalized;
+                return normalized;
             }
         }
 
@@ -3384,11 +3446,6 @@ namespace Oxide.Plugins
 
         #region Methods
 
-        private static string GetName(UnityEngine.Object obj)
-        {
-            return obj == null ? null : obj?.name;
-        }
-
         private static List<CourtApi.CombatLogEventDto> GetCorrectCombatlog(ulong target)
         {
             const int THRESHOLD_STREAK = 20;
@@ -3417,7 +3474,7 @@ namespace Oxide.Plugins
             {
                 var ev = logsList[i];
 
-                if (ev.target != "player" && ev.target != "you")
+                if (ev.target is not "player" and not "you")
                 {
                     continue;
                 }
@@ -3830,27 +3887,6 @@ namespace Oxide.Plugins
                 return request;
             }
 
-            private static string GetError(UnityWebRequest request)
-            {
-                string message;
-                string downloadHandlerText = request.downloadHandler?.text;
-                if (string.IsNullOrEmpty(downloadHandlerText))
-                {
-                    message = "possible network errors, contact @rustapp_help if you see this for more than 5 minutes";
-                }
-                else
-                {
-                    if (downloadHandlerText.Contains("502 bad gateway", StringComparison.OrdinalIgnoreCase) || downloadHandlerText.Contains("cloudflare", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return "rustapp is restarting, please wait";
-                    }
-
-                    message = downloadHandlerText;
-                }
-
-                return $"Error: {request.result}. Message: {message}";
-            }
-
             private static bool TryDeserializeResponse(UnityWebRequest request, out T deserialized)
             {
                 deserialized = default;
@@ -3873,6 +3909,27 @@ namespace Oxide.Plugins
                     Error($"Failed to parse response ({request.method.ToUpper()} {request.url}): {ex} (Response: {request.downloadHandler?.text})");
                     return false;
                 }
+            }
+
+            private static string GetError(UnityWebRequest request)
+            {
+                string message;
+                string downloadHandlerText = request.downloadHandler?.text;
+                if (string.IsNullOrEmpty(downloadHandlerText))
+                {
+                    message = "possible network errors, contact @rustapp_help if you see this for more than 5 minutes";
+                }
+                else
+                {
+                    if (downloadHandlerText.Contains("502 bad gateway", StringComparison.OrdinalIgnoreCase) || downloadHandlerText.Contains("cloudflare", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return "rustapp is restarting, please wait";
+                    }
+
+                    message = downloadHandlerText;
+                }
+
+                return $"Error: {request.result}. Message: {message}";
             }
         }
 
